@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDT Animations — rdt 1.0 → 3.0</title>
+<meta name="description" content="Interactive animations of the reliable data transfer protocols rdt 1.0, 2.0, 2.1, 2.2 and 3.0: FSMs, timelines, corruption, loss and timeouts.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">⇄</span>
+    <div>
+      <h1>Reliable Data Transfer, animated</h1>
+      <p>rdt 1.0 → 2.0 → 2.1 → 2.2 → 3.0 · sender and receiver FSMs + a live timeline</p>
+    </div>
+  </div>
+  <nav id="protoTabs" class="tabs" aria-label="Protocol"></nav>
+</header>
+
+<main>
+  <section class="card info" id="info"></section>
+
+  <section class="card controls">
+    <div class="row">
+      <span class="lbl">Scenario</span>
+      <div id="scenarios" class="chips"></div>
+    </div>
+    <p id="scenDesc" class="scen-desc"></p>
+    <div class="row">
+      <button id="btnPlay" class="btn primary" title="Space">▶ Play</button>
+      <button id="btnStep" class="btn" title="→ key">⏯ Next event</button>
+      <button id="btnEnd" class="btn" title="Run to the end">⏭ Finish</button>
+      <button id="btnReset" class="btn" title="R key">↺ Restart</button>
+      <label class="speed">Speed <input id="speed" type="range" min="2" max="30" value="8"> <span id="speedVal">8</span>×</label>
+      <label class="speed" id="toWrap">Timeout <input id="timeout" type="number" min="12" max="80" value="30"> units</label>
+      <span class="clock" id="clock">t = 0</span>
+    </div>
+    <div class="row inject" id="injectRow">
+      <span class="lbl">Next DATA pkt</span><div class="chips" id="injS"></div>
+      <span class="lbl">Next ACK/NAK</span><div class="chips" id="injR"></div>
+      <span class="hint">Tip: click a packet while it's in flight to corrupt or lose it.</span>
+    </div>
+  </section>
+
+  <section class="stage">
+    <div class="card fsm">
+      <h3>Sender FSM</h3>
+      <svg id="fsmS" class="fsm-svg"></svg>
+      <div class="trans" id="transS"></div>
+    </div>
+
+    <div class="card timeline">
+      <div class="tl-head"><span>Sender</span><span class="ch">unreliable channel · one-way delay = 10</span><span>Receiver</span></div>
+      <div class="tl-scroll" id="tlScroll"><svg id="tl" width="640"></svg></div>
+    </div>
+
+    <div class="card fsm">
+      <h3>Receiver FSM</h3>
+      <svg id="fsmR" class="fsm-svg"></svg>
+      <div class="trans" id="transR"></div>
+    </div>
+  </section>
+
+  <section class="card narr" id="narr"></section>
+
+  <section class="bottom">
+    <div class="card">
+      <h3>Event log</h3>
+      <ol id="log" class="log"></ol>
+    </div>
+    <div class="card">
+      <h3>Delivered to receiving application</h3>
+      <div id="delivered" class="delivered"></div>
+      <div id="util" class="util"></div>
+    </div>
+  </section>
+
+  <section class="card legend">
+    <span><i class="sw data"></i>data packet</span>
+    <span><i class="sw ack"></i>ACK</span>
+    <span><i class="sw nak"></i>NAK</span>
+    <span><i class="sw bad"></i>corrupted (bit errors)</span>
+    <span><b class="x">✕</b> lost in channel</span>
+    <span><i class="sw timer"></i>sender timer running</span>
+    <span>↻ retransmission</span>
+    <span class="keys">Keys: <kbd>Space</kbd> play/pause · <kbd>→</kbd> next event · <kbd>R</kbd> restart</span>
+  </section>
+</main>
+
+<footer>Based on the rdt protocols in Kurose &amp; Ross, <i>Computer Networking: A Top-Down Approach</i>, §3.4 · Nyvora Vision Labs</footer>
+<script src="app.js"></script>
+</body>
+</html>
