@@ -410,7 +410,26 @@ class Sim {
   deliver(d) { this.delivered.push({ data: d, t: this.t, dup: this.isDelivered(d) }); }
   canSetFate(m, fate) {
     if (m.arrived || this.t >= m.t1) return false;
-    if (fate === 'lost' && this.t >= m.t0 + (m.t1 - m.t0) / 2) return false;
+    const mid = m.t0 + (m.t1 - m.t0) / 2;
+    if (m.fate === 'lost' && this.t >= mid) return false;      // already shown lost
+    if (fate === 'lost' && this.t >= mid) return false;        // too late to drop it
+    if (fate === 'delay' && (m.delayed || m.fate === 'lost')) return false;
+    return true;
+  }
+  setFate(m, fate) {
+    if (!this.canSetFate(m, fate)) return false;
+    if (fate === 'delay') {
+      m.t1 = m.t0 + LONG_DELAY; m.delayed = true;
+      this.q = this.q.filter(e => e.data !== m);
+      const mid = m.t0 + LONG_DELAY / 2;
+      if (this.t < mid) this.schedule(mid, 'mid', m);
+      this.schedule(m.t1, 'arrive', m);
+      return true;
+    }
+    if (fate === 'lost' && !this.q.some(e => e.data === m && e.type === 'mid')) {
+      this.schedule(m.t0 + (m.t1 - m.t0) / 2, 'mid', m);
+    }
+    m.fate = fate;
     return true;
   }
 }
@@ -422,8 +441,12 @@ if (typeof module !== 'undefined') module.exports = { P, Sim, ORDER };
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const ui = { proto: '1.0', scen: null, sim: null, playing: false, speed: 8, stopAt: null, lastTs: null, logLen: -1, delLen: -1 };
+  const ui = {
+    proto: '1.0', scen: null, sim: null, future: null, playing: false, speed: 8, stopAt: null, lastTs: null,
+    logLen: -1, delLen: -1, ivs: [], hover: null, sel: null, popResume: false,
+  };
   const yT = t => Y0 + t * PX;
+  const tY = y => (y - Y0) / PX;
 
   /* ---- tabs / scenarios / info ---- */
   function buildTabs() {
@@ -459,7 +482,49 @@ if (typeof document !== 'undefined') {
     reset(true);
   }
 
-  /* ---- injection ---- */
+  /* ---- simulation with recorded interventions (enables rewind + branching) ---- */
+  function newSim() {
+    const to = Math.max(12, Math.min(80, +$('timeout').value || 30));
+    return new Sim(P[ui.proto], ui.scen, { timeout: to });
+  }
+  function applyIv(sim, iv) {
+    if (iv.type === 'pending') sim.pending[iv.side] = iv.fate;
+    else if (iv.type === 'fate') { const m = sim.msgs.find(x => x.id === iv.id); if (m) sim.setFate(m, iv.fate); }
+  }
+  function replay(sim, T) {
+    for (const iv of ui.ivs) {
+      if (iv.t > T) break;
+      sim.advanceTo(iv.t); applyIv(sim, iv);
+    }
+    sim.advanceTo(T);
+    return sim;
+  }
+  function recomputeFuture() {
+    const f = newSim();
+    for (const iv of ui.ivs) { f.advanceTo(iv.t); applyIv(f, iv); }
+    let g = 0;
+    while (!f.done() && g++ < 3000) f.advanceTo(f.q[0].t);
+    ui.future = f;
+  }
+  function intervene(iv) {
+    iv.t = ui.sim.t;
+    ui.ivs = ui.ivs.filter(x => x.t <= iv.t); // branch: drop the old future
+    ui.ivs.push(iv);
+    applyIv(ui.sim, iv);
+    recomputeFuture();
+    ui.logLen = -1; ui.delLen = -1;
+    render();
+  }
+  function seek(T, keepPlaying = false) {
+    T = Math.max(0, Math.min(T, ui.future ? ui.future.t : T));
+    ui.sim = replay(newSim(), T);
+    ui.logLen = -1; ui.delLen = -1; ui.stopAt = null;
+    if (!keepPlaying) ui.playing = false;
+    closePop(false);
+    render();
+  }
+
+  /* ---- injection buttons ---- */
   const FATE_LABEL = { ok: 'normal', corrupt: '⚡ corrupt', lost: '✕ lose', delay: '🐢 delay' };
   function buildInject() {
     const p = P[ui.proto];
@@ -472,63 +537,189 @@ if (typeof document !== 'undefined') {
   }
   $('injectRow').addEventListener('click', e => {
     const b = e.target.closest('.chip'); if (!b) return;
-    ui.sim.pending[b.dataset.side] = b.dataset.f === 'ok' ? null : b.dataset.f;
+    intervene({ type: 'pending', side: b.dataset.side, fate: b.dataset.f === 'ok' ? null : b.dataset.f });
     buildInject();
   });
 
   /* ---- controls ---- */
   function reset(autoplay) {
-    const to = Math.max(12, Math.min(80, +$('timeout').value || 30));
-    ui.sim = new Sim(P[ui.proto], ui.scen, { timeout: to });
+    ui.ivs = [];
+    ui.sim = newSim();
+    recomputeFuture();
     ui.logLen = -1; ui.delLen = -1; ui.stopAt = null;
     ui.playing = !!autoplay;
+    closePop(false);
     $('tlScroll').scrollTop = 0;
     buildInject();
     render();
   }
-  function setPlay(on) { ui.playing = on; if (!on) ui.stopAt = null; updatePlayBtn(); }
+  function setPlay(on) { ui.playing = on; if (!on) ui.stopAt = null; if (on) closePop(false); updatePlayBtn(); }
   function updatePlayBtn() { $('btnPlay').textContent = ui.playing ? '⏸ Pause' : (ui.sim.done() ? '↺ Replay' : '▶ Play'); }
   function play() {
-    if (ui.sim.done()) { reset(true); return; }
+    if (ui.sim.done()) { seek(0); setPlay(true); $('tlScroll').scrollTop = 0; return; } // replay keeps your interventions
     setPlay(!ui.playing);
   }
   function step() {
     if (ui.sim.done()) return;
     const s = ui.sim.nextStop();
     if (s == null) return;
+    closePop(false);
     ui.stopAt = s; ui.playing = true; updatePlayBtn();
   }
+  function stepBack() {
+    const times = ui.sim.log.map(l => l.t).filter(t => t < ui.sim.t - 1e-6);
+    seek(times.length ? Math.max(...times) : 0);
+    follow(true);
+  }
   function finish() {
-    let guard = 0;
-    while (!ui.sim.done() && guard++ < 1000) ui.sim.advanceTo(ui.sim.q[0].t);
-    setPlay(false); render();
+    seek(ui.future.t);
     const sc = $('tlScroll'); sc.scrollTop = sc.scrollHeight;
   }
   $('btnPlay').onclick = play;
   $('btnStep').onclick = step;
+  $('btnBack').onclick = stepBack;
   $('btnEnd').onclick = finish;
   $('btnReset').onclick = () => reset(true);
   $('speed').oninput = e => { ui.speed = +e.target.value; $('speedVal').textContent = ui.speed; };
   $('timeout').onchange = () => reset(true);
+  $('scrub').addEventListener('input', e => { seek(+e.target.value); follow(true); });
+  $('log').addEventListener('click', e => {
+    const li = e.target.closest('li[data-t]'); if (!li) return;
+    seek(+li.dataset.t); follow(true);
+  });
   document.addEventListener('keydown', e => {
     if (e.target.tagName === 'INPUT') return;
     if (e.code === 'Space') { e.preventDefault(); play(); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); step(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); stepBack(); }
+    else if (e.key === 'Escape') closePop(true);
     else if (e.key === 'r' || e.key === 'R') reset(true);
   });
 
-  // click a packet in flight to cycle its fate
-  $('tl').addEventListener('pointerdown', e => {
-    const g = e.target.closest('[data-mid]'); if (!g) return;
-    const m = ui.sim.msgs.find(x => x.id === g.dataset.mid); if (!m) return;
-    const cycle = ['ok', ...P[ui.proto].fates.filter(f => f !== 'delay')];
-    let i = cycle.indexOf(m.fate);
-    for (let k = 1; k <= cycle.length; k++) {
-      const f = cycle[(i + k) % cycle.length];
-      if (f === 'ok' || ui.sim.canSetFate(m, f)) { m.fate = f; break; }
+  /* ---- timeline pointer interaction ---- */
+  function svgPoint(e) {
+    const r = $('tl').getBoundingClientRect();
+    return [(e.clientX - r.left) * 640 / r.width, (e.clientY - r.top) * 640 / r.width];
+  }
+  function geom(m, t) {
+    const xa = m.from === 'S' ? XS : XR, xb = m.from === 'S' ? XR : XS;
+    const ya = yT(m.t0), yb = yT(m.t1);
+    let f = Math.max(0, Math.min(1, (t - m.t0) / (m.t1 - m.t0)));
+    if (m.fate === 'lost') f = Math.min(f, 0.5);
+    return { xa, ya, xb, yb, f, xh: xa + (xb - xa) * f, yh: ya + (yb - ya) * f };
+  }
+  function segDist(p, a, b) {
+    const d = [b[0] - a[0], b[1] - a[1]], l2 = d[0] * d[0] + d[1] * d[1];
+    let u = l2 ? ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l2 : 0;
+    u = Math.max(0, Math.min(1, u));
+    return Math.hypot(p[0] - a[0] - u * d[0], p[1] - a[1] - u * d[1]);
+  }
+  function pickMsg(p) {
+    let best = null, bd = 14;
+    for (const m of ui.sim.msgs) {
+      const g = geom(m, ui.sim.t);
+      if (g.f <= 0) continue;
+      // in-flight packets get an extra-generous target around their head
+      const inflight = !m.arrived && ui.sim.t < m.t1;
+      let d = segDist(p, [g.xa, g.ya], [g.xh, g.yh]);
+      if (inflight) d = Math.min(d, Math.hypot(p[0] - g.xh, p[1] - g.yh) - 10);
+      if (d < bd) { bd = d; best = m; }
     }
-    render();
+    return best;
+  }
+  $('tl').addEventListener('pointerdown', e => {
+    const p = svgPoint(e);
+    const m = pickMsg(p);
+    if (m) { openPop(m, e); return; }
+    if (!$('pop').hidden) { closePop(true); return; }
+    // empty space: jump to that moment
+    const T = tY(p[1]);
+    if (T >= 0) { seek(Math.min(T, ui.future.t)); }
   });
+  $('tl').addEventListener('pointermove', e => {
+    const m = pickMsg(svgPoint(e));
+    const id = m ? m.id : null;
+    $('tl').classList.toggle('over-pkt', !!m);
+    if (id !== ui.hover) { ui.hover = id; if (!ui.playing) renderTimeline(); }
+  });
+  $('tl').addEventListener('pointerleave', () => { ui.hover = null; $('tl').classList.remove('over-pkt'); if (!ui.playing) renderTimeline(); });
+
+  /* ---- packet inspector popover ---- */
+  function openPop(m, e) {
+    ui.popResume = ui.popResume || ui.playing;
+    ui.playing = false; ui.stopAt = null;
+    ui.sel = m.id;
+    const card = document.querySelector('.timeline').getBoundingClientRect();
+    let x = e.clientX - card.left + 14, y = e.clientY - card.top + 10;
+    x = Math.min(x, card.width - 300); x = Math.max(6, x);
+    const pop = $('pop');
+    pop.style.left = x + 'px'; pop.style.top = y + 'px';
+    pop.hidden = false;
+    fillPop();
+    render();
+    // keep it on-screen vertically
+    const pr = pop.getBoundingClientRect();
+    if (pr.bottom > window.innerHeight - 8) pop.style.top = Math.max(6, y - (pr.bottom - window.innerHeight) - 16) + 'px';
+  }
+  function fillPop() {
+    const sim = ui.sim, m = sim.msgs.find(x => x.id === ui.sel);
+    if (!m) { closePop(false); return; }
+    const t = sim.t, p = m.pkt, mid = m.t0 + (m.t1 - m.t0) / 2;
+    const inflight = !m.arrived && t < m.t1 && !(m.fate === 'lost' && t >= mid);
+    const kind = p.type === 'data' ? 'Data packet' : p.type;
+    let status, sc = '';
+    if (m.fate === 'lost') { status = t >= mid ? `lost in channel at t=${mid.toFixed(1)}` : `will be lost at t=${mid.toFixed(1)}`; sc = 'bad'; }
+    else if (m.arrived || t >= m.t1) { status = `arrived at t=${m.t1.toFixed(1)}`; sc = 'good'; }
+    else { status = `in flight, arrives t=${m.t1.toFixed(1)}`; }
+    const ck = m.fate === 'corrupt' ? ['✗ fails, bits flipped', 'bad'] : ['✓ valid', 'good'];
+    const rows = [
+      ['Transmission', `${m.id} (${m.from === 'S' ? 'sender' : 'receiver'} send #${m.id.slice(1)})`],
+      ['Type', kind],
+      ['Seq / ACK #', p.seq === undefined ? '— (none in this protocol)' : p.seq],
+      ...(p.type === 'data' ? [['Payload', p.data]] : []),
+      ['Checksum', ck[0], ck[1]],
+      ['Sent at', `t=${m.t0.toFixed(1)}${m.retx ? ' · ↻ retransmission' : ''}`],
+      ['Status', status, sc],
+      ...(m.delayed ? [['Delay', `${(m.t1 - m.t0)} (slow path)`, 'warn']] : []),
+    ];
+    let acts = '';
+    const fates = P[ui.proto].fates;
+    if (!fates.length) {
+      acts = `<div class="why">rdt 1.0 assumes a perfect channel, so nothing can go wrong here. Try rdt 2.0+.</div>`;
+    } else if (inflight) {
+      const opt = [['ok', '✓ deliver intact'], ['corrupt', '⚡ flip bits'], ['lost', '✕ lose it'], ['delay', '🐢 delay it']]
+        .filter(([f]) => f === 'ok' || fates.includes(f));
+      acts = '<div class="acts">' + opt.map(([f, lbl]) => {
+        const can = f === 'ok' ? m.fate !== 'ok' && sim.canSetFate(m, 'ok') : f === m.fate ? false : sim.canSetFate(m, f);
+        const cur = (f === m.fate) || (f === 'delay' && m.delayed);
+        return `<button class="chip${f !== 'ok' ? ' inj' : ''}${cur ? ' on' : ''}" data-f="${f}" ${can ? '' : 'disabled'}>${lbl}</button>`;
+      }).join('') + '</div>';
+      const notes = [];
+      if (fates.includes('lost') && t >= mid) notes.push('Past the midpoint: too late to lose it.');
+      if (!fates.includes('lost')) notes.push(`${P[ui.proto].name} assumes the channel never loses packets.`);
+      acts += `<div class="why">Paused. Pick what the channel does to this packet. ${notes.join(' ')}</div>`;
+    } else {
+      acts = `<div class="why">This packet is no longer in flight. Drag the time bar back (or click earlier on the timeline) to change its fate and branch a new history.</div>`;
+    }
+    $('pop').innerHTML = `<h4><span>${esc((m.retx ? '↻ ' : '') + m.label)}</span><button class="x" aria-label="close">×</button></h4>
+      <table>${rows.map(([k, v, c]) => `<tr><td>${esc(k)}</td><td class="${c || ''}">${esc(v)}</td></tr>`).join('')}</table>${acts}`;
+  }
+  $('pop').addEventListener('click', e => {
+    if (e.target.closest('.x')) { closePop(true); return; }
+    const b = e.target.closest('.chip[data-f]'); if (!b || b.disabled) return;
+    const m = ui.sim.msgs.find(x => x.id === ui.sel); if (!m) return;
+    intervene({ type: 'fate', id: m.id, fate: b.dataset.f });
+    closePop(true);
+  });
+  function closePop(resume) {
+    const pop = $('pop');
+    if (!pop) return;
+    const wasOpen = !pop.hidden;
+    pop.hidden = true; ui.sel = null;
+    if (wasOpen && resume && ui.popResume && !ui.sim.done()) ui.playing = true;
+    ui.popResume = false;
+    if (wasOpen && ui.sim) render();
+  }
 
   /* ---- main loop ---- */
   function frame(ts) {
@@ -544,9 +735,10 @@ if (typeof document !== 'undefined') {
     ui.lastTs = ts;
     requestAnimationFrame(frame);
   }
-  function follow() {
+  function follow(center) {
     const sc = $('tlScroll');
     const y = yT(ui.sim.t);
+    if (center) { if (y < sc.scrollTop + 20 || y > sc.scrollTop + sc.clientHeight - 20) sc.scrollTop = y - sc.clientHeight / 2; return; }
     if (y > sc.scrollTop + sc.clientHeight * 0.75) sc.scrollTop = y - sc.clientHeight * 0.75;
   }
 
@@ -554,6 +746,9 @@ if (typeof document !== 'undefined') {
   function render() {
     const sim = ui.sim;
     $('clock').textContent = `t = ${sim.t.toFixed(1)}`;
+    const end = ui.future ? ui.future.t : sim.t;
+    $('scrub').max = end; $('scrub').value = sim.t;
+    $('scrubT').textContent = sim.t.toFixed(1); $('scrubEnd').textContent = end.toFixed(0);
     updatePlayBtn();
     renderTimeline();
     renderFSM($('fsmS'), ui.sim.p.sStates, ui.sim.p.sEdges, sim.S.state, sim.last.S, 'S');
@@ -562,7 +757,7 @@ if (typeof document !== 'undefined') {
     renderTrans('transR', sim.last.R, sim.R, ui.sim.p.rStates);
     if (sim.log.length !== ui.logLen) { ui.logLen = sim.log.length; renderLog(); renderNarr(); buildInject(); }
     if (sim.delivered.length !== ui.delLen) { ui.delLen = sim.delivered.length; renderDelivered(); }
-    if (sim.done() && !ui.finishedShown) renderNarr();
+    if (!$('pop').hidden) fillPop();
   }
 
   function renderTrans(id, last, st, states) {
@@ -575,7 +770,7 @@ if (typeof document !== 'undefined') {
   function renderLog() {
     const sim = ui.sim;
     const sideName = { S: 'SENDER', R: 'RECEIVER', C: 'CHANNEL' };
-    $('log').innerHTML = sim.log.map(l => `<li class="${l.kind}"><span class="lt">${l.t.toFixed(1)}</span><span class="ls ${l.side}">${sideName[l.side]}</span><span class="lx">${esc(l.text)}</span></li>`).join('');
+    $('log').innerHTML = sim.log.map(l => `<li class="${l.kind}" data-t="${l.t}" title="jump to t=${l.t.toFixed(1)}"><span class="lt">${l.t.toFixed(1)}</span><span class="ls ${l.side}">${sideName[l.side]}</span><span class="lx">${esc(l.text)}</span></li>`).join('');
     $('log').scrollTop = $('log').scrollHeight;
   }
   function renderNarr() {
@@ -601,74 +796,67 @@ if (typeof document !== 'undefined') {
     $('delivered').innerHTML = d.length ? d.map(x => `<span class="dchip${x.dup ? ' dup' : ''}" title="t=${x.t.toFixed(1)}">${x.data}${x.dup ? ' (dup!)' : ''}</span>`).join('') : '<span class="hint">nothing yet</span>';
   }
 
-  function renderTimeline() {
-    const sim = ui.sim, t = sim.t;
-    const endT = Math.max(t + 20, 70);
-    const H = yT(endT) + 20;
-    const svg = $('tl');
-    svg.setAttribute('height', H);
-    svg.setAttribute('viewBox', `0 0 640 ${H}`);
-    const o = [];
-    o.push(`<defs>
-      <marker id="ah-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/></marker>
-      <marker id="ah-ack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
-      <marker id="ah-nak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f0883e"/></marker>
-      <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff5c7a"/></marker>
-    </defs>`);
-    for (let k = 0; k <= endT; k += 10) {
-      o.push(`<line class="tickline" x1="40" x2="600" y1="${yT(k)}" y2="${yT(k)}"/><text class="tick" x="4" y="${yT(k) + 3}">${k}</text>`);
-    }
-    o.push(`<line class="life" x1="${XS}" x2="${XS}" y1="${Y0 - 10}" y2="${H}"/><line class="life" x1="${XR}" x2="${XR}" y1="${Y0 - 10}" y2="${H}"/>`);
-
+  function drawSim(o, sim, t, ghost) {
     // timers
     for (const tm of sim.timers) {
-      const y1 = yT(tm.start), y2 = yT(tm.end != null ? tm.end : t);
-      const cls = tm.how === 'timeout' ? 'timer fired' : tm.how === 'stop' ? 'timer done' : 'timer';
+      if (tm.start > t) continue;
+      const end = tm.end != null && tm.end <= t ? tm.end : t;
+      const how = tm.end != null && tm.end <= t ? tm.how : null;
+      const y1 = yT(tm.start), y2 = yT(end);
+      const cls = how === 'timeout' ? 'timer fired' : how === 'stop' ? 'timer done' : 'timer';
       o.push(`<rect class="${cls}" x="${XS - 13}" y="${y1}" width="6" height="${Math.max(0, y2 - y1)}" rx="2"/>`);
+      if (how === 'timeout') o.push(`<circle cx="${XS - 10}" cy="${yT(tm.end)}" r="3.5" fill="#ff5c7a"/>`);
     }
-
     // messages
     for (const m of sim.msgs) {
-      const xa = m.from === 'S' ? XS : XR, xb = m.from === 'S' ? XR : XS;
-      const ya = yT(m.t0), yb = yT(m.t1);
-      let f = Math.min(1, (t - m.t0) / (m.t1 - m.t0));
-      const lostShown = m.fate === 'lost' && f >= 0.5;
-      if (m.fate === 'lost') f = Math.min(f, 0.5);
-      const xh = xa + (xb - xa) * f, yh = ya + (yb - ya) * f;
+      if (m.t0 > t) continue;
+      const g = geom(m, t);
+      const lostShown = m.fate === 'lost' && t >= m.t0 + (m.t1 - m.t0) / 2;
       const bad = m.fate === 'corrupt';
-      const cls = `msg ${m.kind}${bad ? ' corrupt' : ''}`;
+      const hl = !ghost && (m.id === ui.sel ? ' sel' : m.id === ui.hover ? ' hover' : '');
+      const cls = `msg ${m.kind}${bad ? ' corrupt' : ''}${hl || ''}`;
       const marker = lostShown ? '' : `marker-end="url(#ah-${bad ? 'bad' : m.kind})"`;
-      const inflight = !m.arrived && !lostShown && t < m.t1;
-      o.push(`<g ${inflight ? `data-mid="${m.id}"` : ''}>`);
-      if (f > 0) o.push(`<line class="${cls}" x1="${xa}" y1="${ya}" x2="${xh}" y2="${yh}" ${marker}/>`);
-      if (inflight) o.push(`<line class="hit" x1="${xa}" y1="${ya}" x2="${xh}" y2="${yh}"/><circle class="hit" cx="${xh}" cy="${yh}" r="10" style="fill:transparent"/>`);
-      // label
+      if (g.f > 0) o.push(`<line class="${cls}" x1="${g.xa}" y1="${g.ya}" x2="${g.xh}" y2="${g.yh}" ${marker}/>`);
+      const inflight = !ghost && !m.arrived && !lostShown && t < m.t1;
+      if (inflight && g.f > 0) o.push(`<circle class="headdot live" cx="${g.xh}" cy="${g.yh}" r="3"/>`);
       const lf = m.fate === 'lost' ? 0.28 : 0.42;
-      if (f >= lf) {
-        const lx = xa + (xb - xa) * lf, ly = ya + (yb - ya) * lf;
+      if (g.f >= lf) {
+        const lx = g.xa + (g.xb - g.xa) * lf, ly = g.ya + (g.yb - g.ya) * lf;
         const txt = (m.retx ? '↻ ' : '') + m.label + (bad ? ' ⚡' : '') + (m.delayed ? ' (delayed)' : '');
         const w = txt.length * 6.6 + 10;
         o.push(`<rect class="lblbg" x="${lx - w / 2}" y="${ly - 9}" width="${w}" height="16" rx="4"/><text class="mlabel ${bad ? 'corrupt' : m.kind}" x="${lx}" y="${ly + 3}" text-anchor="middle">${esc(txt)}</text>`);
       }
-      if (lostShown) {
-        o.push(`<text class="xmark" x="${xh}" y="${yh + 6}" text-anchor="middle">✕</text><text class="note bad" x="${xh}" y="${yh + 20}" text-anchor="middle">lost</text>`);
-      }
-      o.push('</g>');
+      if (lostShown) o.push(`<text class="xmark" x="${g.xh}" y="${g.yh + 6}" text-anchor="middle">✕</text><text class="note bad" x="${g.xh}" y="${g.yh + 20}" text-anchor="middle">lost</text>`);
     }
-
     // annotations
     const lastY = { S: -99, R: -99 };
     for (const l of sim.log) {
-      if (!l.note || l.side === 'C') continue;
+      if (!l.note || l.side === 'C' || l.t > t) continue;
       let y = yT(l.t) + 4;
       if (y < lastY[l.side] + 13) y = lastY[l.side] + 13;
       lastY[l.side] = y;
       const x = l.side === 'S' ? XS - 20 : XR + 12;
       o.push(`<text class="note ${l.kind}" x="${x}" y="${y}" text-anchor="${l.side === 'S' ? 'end' : 'start'}">${esc(l.note)}</text>`);
     }
-    // timeout markers
-    for (const tm of sim.timers) if (tm.how === 'timeout') o.push(`<circle cx="${XS - 10}" cy="${yT(tm.end)}" r="3.5" fill="#ff5c7a"/>`);
+  }
 
+  function renderTimeline() {
+    const sim = ui.sim, t = sim.t, fut = ui.future;
+    const showGhost = fut && fut.t > t + 1e-6;
+    const endT = Math.max(t + 20, showGhost ? fut.t + 12 : 0, 70);
+    const H = yT(endT) + 20;
+    const svg = $('tl');
+    svg.setAttribute('height', H);
+    svg.setAttribute('viewBox', `0 0 640 ${H}`);
+    const o = [];
+    const mk = (id, c) => `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`;
+    o.push(`<defs>${mk('ah-data', '#58a6ff')}${mk('ah-ack', '#3fb950')}${mk('ah-nak', '#f0883e')}${mk('ah-bad', '#ff5c7a')}</defs>`);
+    for (let k = 0; k <= endT; k += 10) {
+      o.push(`<line class="tickline" x1="40" x2="600" y1="${yT(k)}" y2="${yT(k)}"/><text class="tick" x="4" y="${yT(k) + 3}">${k}</text>`);
+    }
+    o.push(`<line class="life" x1="${XS}" x2="${XS}" y1="${Y0 - 10}" y2="${H}"/><line class="life" x1="${XR}" x2="${XR}" y1="${Y0 - 10}" y2="${H}"/>`);
+    if (showGhost) { o.push('<g class="ghost">'); drawSim(o, fut, fut.t, true); o.push('</g>'); }
+    drawSim(o, sim, t, false);
     o.push(`<line class="now" x1="30" x2="610" y1="${yT(t)}" y2="${yT(t)}"/>`);
     svg.innerHTML = o.join('');
   }
@@ -764,5 +952,6 @@ if (typeof document !== 'undefined') {
   /* ---- boot ---- */
   const h = location.hash.slice(1);
   selectProto(ORDER.includes(h) ? h : '1.0');
+  window.addEventListener('hashchange', () => { const k = location.hash.slice(1); if (ORDER.includes(k) && k !== ui.proto) selectProto(k); });
   requestAnimationFrame(frame);
 }

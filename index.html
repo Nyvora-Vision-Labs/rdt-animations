@@ -30,6 +30,7 @@
     <p id="scenDesc" class="scen-desc"></p>
     <div class="row">
       <button id="btnPlay" class="btn primary" title="Space">▶ Play</button>
+      <button id="btnBack" class="btn" title="← key">⏮ Prev event</button>
       <button id="btnStep" class="btn" title="→ key">⏯ Next event</button>
       <button id="btnEnd" class="btn" title="Run to the end">⏭ Finish</button>
       <button id="btnReset" class="btn" title="R key">↺ Restart</button>
@@ -40,7 +41,7 @@
     <div class="row inject" id="injectRow">
       <span class="lbl">Next DATA pkt</span><div class="chips" id="injS"></div>
       <span class="lbl">Next ACK/NAK</span><div class="chips" id="injR"></div>
-      <span class="hint">Tip: click a packet while it's in flight to corrupt or lose it.</span>
+      <span class="hint">Or do it directly on the timeline: click any packet.</span>
     </div>
   </section>
 
@@ -53,7 +54,14 @@
 
     <div class="card timeline">
       <div class="tl-head"><span>Sender</span><span class="ch">unreliable channel · one-way delay = 10</span><span>Receiver</span></div>
+      <div class="scrub">
+        <span class="scrub-t" id="scrubT">0</span>
+        <input id="scrub" type="range" min="0" max="100" step="0.1" value="0" aria-label="Scrub through time">
+        <span class="scrub-t" id="scrubEnd">0</span>
+      </div>
+      <div class="tl-help">🖱 <b>Click a packet</b> to inspect it, or corrupt / lose / delay it in flight · <b>click empty space</b> to jump to that moment · drag the bar above to rewind. The faded part is what will happen next.</div>
       <div class="tl-scroll" id="tlScroll"><svg id="tl" width="640"></svg></div>
+      <div class="pop" id="pop" hidden></div>
     </div>
 
     <div class="card fsm">
@@ -85,7 +93,7 @@
     <span><b class="x">✕</b> lost in channel</span>
     <span><i class="sw timer"></i>sender timer running</span>
     <span>↻ retransmission</span>
-    <span class="keys">Keys: <kbd>Space</kbd> play/pause · <kbd>→</kbd> next event · <kbd>R</kbd> restart</span>
+    <span class="keys">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> prev/next event · click a log entry to jump there · <kbd>R</kbd> restart</span>
   </section>
 </main>
 

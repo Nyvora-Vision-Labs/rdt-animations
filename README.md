@@ -18,7 +18,8 @@ Each protocol has:
 - **Sender and receiver FSMs** that highlight the current state and the transition just taken
 - **A timeline (sequence diagram)** with packets in flight, timers, losses and corruption
 - **Scripted scenarios**: for example, rdt 2.0's corrupted-ACK fatal flaw, and the four classic rdt 3.0 cases (no loss, packet loss, ACK loss, premature timeout)
-- **Free play**: corrupt, lose or delay the next packet, or click a packet in flight to change its fate
+- **Interactive timeline**: click any packet to inspect its header (seq #, payload, checksum, timing) and, while it's in flight, corrupt, lose or delay it. Click empty space or drag the time bar to rewind; a change made in the past branches a new history. A faded preview shows what will happen next
+- **Free play**: corrupt, lose or delay the next packet from the toolbar
 - An event log, the data delivered to the receiving app (duplicates flagged), and a stop-and-wait utilization calculator for rdt 3.0
 
 The simulator runs the real FSM logic of each protocol as a discrete-event simulation. It isn't a canned
@@ -26,4 +27,4 @@ animation, so whatever you inject, the protocol responds the way its FSM says it
 
 Plain HTML/CSS/JS, no build step. Run locally with `python3 -m http.server` and open `http://localhost:8000`.
 
-Keys: `Space` play/pause · `→` next event · `R` restart. Deep-link a protocol with `#2.1`, `#3.0`, etc.
+Keys: `Space` play/pause · `←`/`→` previous/next event · `Esc` close inspector · `R` restart. Click an event-log entry to jump to it. Deep-link a protocol with `#2.1`, `#3.0`, etc.
