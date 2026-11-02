@@ -257,7 +257,7 @@ P['3.0'] = {
   title: 'rdt 3.0 — a channel with errors and loss',
   sub: 'The alternating-bit protocol: rdt 2.2 plus a countdown timer.',
   info: [
-    ['Channel assumptions', ['Bit errors in data and ACKs', 'Packets (data or ACKs) can be lost', 'Packets may be delayed but are not reordered']],
+    ['Channel assumptions', ['Bit errors in data and ACKs', 'Packets (data or ACKs) can be lost', 'Packets may be delayed but are never reordered (the alternating-bit protocol depends on this)']],
     ['New mechanisms', ['Countdown timer: start on send, stop on the correct ACK', 'Timeout → retransmit and restart the timer', 'Wrong or garbled ACK → do nothing (Λ), let the timer handle it', 'Seq #s absorb the duplicates a premature timeout creates']],
     ['Performance', ['Stop-and-wait: U_sender = (L/R) / (RTT + L/R)', 'Correct but slow, which motivates pipelining (GBN / SR)']],
   ],
@@ -279,7 +279,7 @@ P['3.0'] = {
     { id: 'ackloss', name: '(c) ACK loss', count: 3, fates: { R2: 'lost' }, desc: 'pkt1 is delivered but ACK1 is lost. On timeout the sender resends pkt1. The receiver (now waiting for 0) sees a duplicate, discards it and re-sends ACK1.' },
     { id: 'premature', name: '(d) Premature timeout', count: 3, fates: { R2: 'delay' }, desc: 'ACK1 is only delayed, but the timer fires first and pkt1 is resent anyway. The late ACK1 still advances the sender. The receiver discards the duplicate pkt1 and re-sends ACK1, which the sender (now waiting for ACK0) ignores. Correct, just wasteful.' },
     { id: 'corrupt', name: 'Corrupted packet', count: 3, fates: { S2: 'corrupt' }, desc: 'pkt1 is corrupted. The receiver re-sends ACK0. The sender, waiting for ACK1, does nothing (Λ) and the timeout triggers the retransmission.' },
-    { id: 'free', name: 'Free play', count: 6, desc: 'Lose, corrupt or delay packets yourself. Try a short timeout (e.g. 18 < RTT = 20) to see premature timeouts everywhere.' },
+    { id: 'free', name: 'Free play', count: 6, desc: 'Lose, corrupt or delay packets yourself. Try a short timeout (e.g. 18 < RTT = 20) to see premature timeouts everywhere. Warning: delays plus retransmissions can make a later packet overtake an earlier one. That reordering is outside rdt 3.0\'s assumptions and can make the alternating-bit protocol fail. The site flags it when it happens.' },
   ],
   init(sim) { sim.S.state = 'call0'; sim.S.seq = 0; sim.R.state = 'w0'; sim.R.exp = 0; },
   onApp(sim, d) {
@@ -361,6 +361,12 @@ class Sim {
       const m = e.data;
       if (m.fate === 'lost') return;
       m.arrived = true;
+      // did this packet overtake an earlier one in the same direction? (rdt 3.0 assumes no reordering)
+      const overtaken = this.msgs.find(o => o !== m && o.from === m.from && o.t0 < m.t0 && o.fate !== 'lost' && !o.arrived && o.t1 > this.t);
+      if (overtaken) {
+        this.reordered = true;
+        this.addLog('C', `⚠ REORDERING: ${m.retx ? '↻ ' : ''}${m.label} (sent t=${m.t0.toFixed(1)}) overtook ${overtaken.label} (sent t=${overtaken.t0.toFixed(1)}). rdt 3.0 assumes the channel never reorders, and a 1-bit sequence number can't tell an old packet from a new one`, 'warn');
+      }
       const pkt = Object.assign({}, m.pkt, { corrupt: m.fate === 'corrupt' });
       if (m.from === 'S') this.p.onRecvR(this, pkt, m); else this.p.onRecvS(this, pkt, m);
     } else if (e.type === 'timeout') {
@@ -777,12 +783,22 @@ if (typeof document !== 'undefined') {
     const sim = ui.sim;
     const n = $('narr');
     if (sim.done()) {
+      const got = sim.delivered.map(d => d.data);
+      const want = Array.from({ length: sim.total }, (_, i) => 'D' + (i + 1));
+      const ok = got.join() === want.join();
       const dups = sim.delivered.filter(d => d.dup).length;
-      const ok = !dups && sim.delivered.length === sim.total;
+      const missing = want.filter(d => !got.includes(d));
+      const probs = [];
+      if (dups) probs.push(`${dups} duplicate${dups === 1 ? '' : 's'}`);
+      if (missing.length) probs.push(`${missing.join(', ')} never delivered`);
+      if (!dups && !missing.length) probs.push('out of order');
+      let why = '';
+      if (!ok && sim.reordered) why = ' Cause: the channel reordered packets (see ⚠ in the log). This breaks rdt 3.0\'s assumption, so the failure is the protocol\'s real limit, not a bug: a stale packet or ACK with the same 1-bit seq # is accepted as new.';
+      else if (!ok && ui.proto === '2.0') why = ' Cause: rdt 2.0 can\'t handle a garbled ACK/NAK, and with no sequence numbers the receiver accepts the retransmission as new data.';
       n.className = 'card narr ' + (ok ? 'good' : 'bad');
       n.innerHTML = `<span class="tag">DONE</span><span>${ok
         ? `All ${sim.total} chunks delivered exactly once, in order, at t = ${sim.t.toFixed(1)}. Transmissions: ${sim.counts.S} data, ${sim.counts.R} feedback.`
-        : `Finished, but the app got ${sim.delivered.map(d => d.data).join(', ')}. ${dups} duplicate${dups === 1 ? '' : 's'} delivered: the protocol failed.`}</span>`;
+        : `Protocol failed: the app got ${got.join(', ') || 'nothing'} (${probs.join('; ')}).${why}`}</span>`;
       return;
     }
     const l = sim.log[sim.log.length - 1];
